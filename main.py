@@ -1,731 +1,510 @@
-# main.py – Inventory Tracking System
-# CCC 151 Final Project  |  Python + Flet + MySQL
-# ─────────────────────────────────────────────────────────────
+# main.py — Simple Inventory Tracking System
+# CCC 151 Final Project | Python + Flet + MySQL
+# ──────────────────────────────────────────────
+# HOW TO RUN:
+#   1. pip install flet mysql-connector-python
+#   2. Run db_setup.sql in MySQL Workbench first
+#   3. Edit DB_HOST / DB_USER / DB_PASS below
+#   4. python main.py
+# ──────────────────────────────────────────────
 
 import flet as ft
-from flet import (
-    Page, View, AppBar, NavigationRail, NavigationRailDestination,
-    Text, Icon, icons, colors, ElevatedButton, TextButton,
-    TextField, Dropdown, dropdown, DataTable, DataColumn, DataRow, DataCell,
-    Column, Row, Container, Card, Divider, AlertDialog,
-    MainAxisAlignment, CrossAxisAlignment, ScrollMode,
-    SnackBar, IconButton, FilledButton, OutlinedButton,
-    padding, border_radius, border, FontWeight, TextThemeStyle,
-    ThemeMode, Theme, ColorScheme,
-)
-import db
+import mysql.connector
 
-# ═══════════════════════════════════════════════════════════════
-#  COLOUR TOKENS
-# ═══════════════════════════════════════════════════════════════
-PRIMARY        = "#1E3A5F"   # deep navy
-SECONDARY      = "#2E86AB"   # teal-blue
-ACCENT         = "#F0A500"   # amber
-DANGER         = "#E63946"   # red
-SUCCESS        = "#2DC653"   # green
-BG             = "#F4F6FB"   # light grey bg
-SURFACE        = "#FFFFFF"
-TEXT_DARK      = "#1A1A2E"
-TEXT_MUTED     = "#6B7280"
-NAV_BG         = "#1E3A5F"
-NAV_SELECTED   = "#2E86AB"
+# ═══════════════════════════════════════
+#  DATABASE CONFIG  ← edit these
+# ═══════════════════════════════════════
+DB_HOST = "localhost"
+DB_USER = "root"
+DB_PASS = ""          # your MySQL password
+DB_NAME = "inventory_db"
 
-
-# ═══════════════════════════════════════════════════════════════
-#  HELPERS
-# ═══════════════════════════════════════════════════════════════
-
-def stat_card(title: str, value: str, icon_name: str, color: str):
-    return Card(
-        elevation=3,
-        surface_tint_color=color,
-        content=Container(
-            padding=padding.all(20),
-            width=200,
-            content=Column(
-                spacing=8,
-                controls=[
-                    Icon(icon_name, color=color, size=32),
-                    Text(value, size=28, weight=FontWeight.BOLD, color=TEXT_DARK),
-                    Text(title,  size=13, color=TEXT_MUTED),
-                ],
-            ),
-        ),
+# ═══════════════════════════════════════
+#  DB HELPERS
+# ═══════════════════════════════════════
+def get_conn():
+    return mysql.connector.connect(
+        host=DB_HOST, user=DB_USER, password=DB_PASS, database=DB_NAME
     )
 
+def run(sql, params=(), fetch=False):
+    c = get_conn()
+    cur = c.cursor(dictionary=True)
+    cur.execute(sql, params)
+    result = cur.fetchall() if fetch else None
+    c.commit()
+    c.close()
+    return result or []
 
-def section_title(text: str):
-    return Text(text, size=20, weight=FontWeight.BOLD, color=PRIMARY)
+def get_products(search=""):
+    if search:
+        kw = f"%{search}%"
+        return run("""
+            SELECT p.product_id, p.product_name, c.category_name,
+                   s.supplier_name, p.quantity, p.price
+            FROM   products p
+            LEFT JOIN categories c ON p.category_id = c.category_id
+            LEFT JOIN suppliers  s ON p.supplier_id  = s.supplier_id
+            WHERE  p.product_name LIKE %s OR c.category_name LIKE %s
+            ORDER BY p.product_name
+        """, (kw, kw), fetch=True)
+    return run("""
+        SELECT p.product_id, p.product_name, c.category_name,
+               s.supplier_name, p.quantity, p.price
+        FROM   products p
+        LEFT JOIN categories c ON p.category_id = c.category_id
+        LEFT JOIN suppliers  s ON p.supplier_id  = s.supplier_id
+        ORDER BY p.product_name
+    """, fetch=True)
 
+def get_categories():  return run("SELECT * FROM categories ORDER BY category_name", fetch=True)
+def get_suppliers():   return run("SELECT * FROM suppliers  ORDER BY supplier_name",  fetch=True)
+def get_transactions():
+    return run("""
+        SELECT t.transaction_id, p.product_name, t.type,
+               t.quantity, t.transaction_date
+        FROM   transactions t
+        JOIN   products p ON t.product_id = p.product_id
+        ORDER  BY t.transaction_date DESC LIMIT 100
+    """, fetch=True)
 
-def snack(page: Page, msg: str, error=False):
-    page.snack_bar = SnackBar(
-        content=Text(msg, color=colors.WHITE),
-        bgcolor=DANGER if error else SUCCESS,
-        duration=2500,
-    )
-    page.snack_bar.open = True
-    page.update()
+def add_product(name, cat_id, sup_id, qty, price):
+    run("INSERT INTO products (product_name,category_id,supplier_id,quantity,price) VALUES (%s,%s,%s,%s,%s)",
+        (name, cat_id, sup_id, qty, price))
 
+def update_product(pid, name, cat_id, sup_id, qty, price):
+    run("UPDATE products SET product_name=%s,category_id=%s,supplier_id=%s,quantity=%s,price=%s WHERE product_id=%s",
+        (name, cat_id, sup_id, qty, price, pid))
 
-def confirm_dialog(page: Page, message: str, on_confirm):
-    dlg = AlertDialog(
-        modal=True,
-        title=Text("Confirm Action", weight=FontWeight.BOLD),
-        content=Text(message),
-        actions=[
-            TextButton("Cancel",  on_click=lambda e: close_dlg(page, dlg)),
-            FilledButton(
-                "Confirm",
-                style=ft.ButtonStyle(bgcolor=DANGER),
-                on_click=lambda e: [close_dlg(page, dlg), on_confirm()],
-            ),
-        ],
-    )
-    page.dialog = dlg
-    dlg.open = True
-    page.update()
+def delete_product(pid):
+    run("DELETE FROM products WHERE product_id=%s", (pid,))
 
+def log_transaction(pid, tx_type, qty):
+    run("INSERT INTO transactions (product_id,type,quantity) VALUES (%s,%s,%s)", (pid, tx_type, qty))
+    delta = qty if tx_type == "IN" else -qty
+    run("UPDATE products SET quantity = quantity + %s WHERE product_id=%s", (delta, pid))
 
-def close_dlg(page: Page, dlg: AlertDialog):
-    dlg.open = False
-    page.update()
+def add_category(name):   run("INSERT IGNORE INTO categories (category_name) VALUES (%s)", (name,))
+def add_supplier(name, contact): run("INSERT INTO suppliers (supplier_name,contact) VALUES (%s,%s)", (name, contact))
 
+# ═══════════════════════════════════════
+#  COLORS
+# ═══════════════════════════════════════
+NAVY   = "#1B3A6B"
+BLUE   = "#2E86AB"
+GREEN  = "#27AE60"
+RED    = "#E74C3C"
+AMBER  = "#F39C12"
+BG     = "#F5F7FA"
+WHITE  = "#FFFFFF"
+GRAY   = "#6B7280"
 
-# ═══════════════════════════════════════════════════════════════
-#  PAGE BUILDERS
-# ═══════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════
+#  MAIN
+# ═══════════════════════════════════════
+def main(page: ft.Page):
+    page.title         = "Inventory Tracking System"
+    page.window_width  = 1000
+    page.window_height = 680
+    page.bgcolor       = BG
+    page.padding       = 0
+    page.theme_mode    = ft.ThemeMode.LIGHT
 
-# ───────────────────────────────────────────
-#  DASHBOARD
-# ───────────────────────────────────────────
+    body = ft.Column(expand=True, scroll=ft.ScrollMode.AUTO)
 
-def build_dashboard(page: Page):
-    stats = db.get_dashboard_stats()
-    low   = db.get_low_stock_products()
-
-    low_rows = [
-        DataRow(cells=[
-            DataCell(Text(r["product_name"])),
-            DataCell(Text(r["sku"] or "")),
-            DataCell(Text(r["category_name"] or "")),
-            DataCell(Text(str(r["quantity"]), color=DANGER, weight=FontWeight.BOLD)),
-            DataCell(Text(str(r["reorder_level"]))),
-        ])
-        for r in low
-    ]
-
-    return Column(
-        scroll=ScrollMode.AUTO,
-        spacing=24,
-        controls=[
-            section_title("📊  Dashboard"),
-            Divider(height=1, color="#E5E7EB"),
-            Row(
-                wrap=True,
-                spacing=16,
-                controls=[
-                    stat_card("Total Products",   str(stats["total_products"]),  icons.INVENTORY_2,      SECONDARY),
-                    stat_card("Low Stock Items",  str(stats["low_stock"]),       icons.WARNING_ROUNDED,  DANGER),
-                    stat_card("Inventory Value",  f"₱{stats['inventory_value']:,.2f}", icons.MONETIZATION_ON, SUCCESS),
-                    stat_card("Today's Transactions", str(stats["today_tx"]),   icons.SWAP_HORIZ,       ACCENT),
-                ],
-            ),
-            section_title("⚠️  Low Stock Alerts"),
-            Card(
-                elevation=2,
-                content=Container(
-                    padding=padding.all(16),
-                    content=DataTable(
-                        columns=[
-                            DataColumn(Text("Product",      weight=FontWeight.BOLD)),
-                            DataColumn(Text("SKU",          weight=FontWeight.BOLD)),
-                            DataColumn(Text("Category",     weight=FontWeight.BOLD)),
-                            DataColumn(Text("Qty",          weight=FontWeight.BOLD)),
-                            DataColumn(Text("Reorder Lvl",  weight=FontWeight.BOLD)),
-                        ],
-                        rows=low_rows if low_rows else [
-                            DataRow(cells=[
-                                DataCell(Text("✅ No low-stock items!", color=SUCCESS)),
-                                DataCell(Text("")), DataCell(Text("")),
-                                DataCell(Text("")), DataCell(Text("")),
-                            ])
-                        ],
-                        border=ft.border.all(1, "#E5E7EB"),
-                        border_radius=border_radius.all(8),
-                        horizontal_lines=ft.border.BorderSide(1, "#F3F4F6"),
-                    ),
-                ),
-            ),
-        ],
-    )
-
-
-# ───────────────────────────────────────────
-#  PRODUCTS  (full CRUD)
-# ───────────────────────────────────────────
-
-def build_products(page: Page):
-    search_tf = TextField(
-        hint_text="Search by name, SKU or category…",
-        prefix_icon=icons.SEARCH,
-        expand=True,
-        border_color=SECONDARY,
-        focused_border_color=PRIMARY,
-        border_radius=8,
-    )
-
-    table_container = Column(scroll=ScrollMode.AUTO, expand=True)
-
-    # ── helpers ────────────────────────────────
-    def refresh(keyword=""):
-        rows_data = db.search_products(keyword) if keyword else db.get_all_products()
-        table_container.controls.clear()
-        if not rows_data:
-            table_container.controls.append(Text("No products found.", color=TEXT_MUTED))
-            page.update()
-            return
-
-        dt_rows = []
-        for r in rows_data:
-            qty_color = DANGER if r["quantity"] <= r["reorder_level"] else TEXT_DARK
-            dt_rows.append(DataRow(
-                cells=[
-                    DataCell(Text(r["product_name"])),
-                    DataCell(Text(r["sku"] or "")),
-                    DataCell(Text(r["category_name"] or "")),
-                    DataCell(Text(r["supplier_name"] or "")),
-                    DataCell(Text(str(r["quantity"]), color=qty_color, weight=FontWeight.BOLD)),
-                    DataCell(Text(f"₱{r['unit_price']:,.2f}")),
-                    DataCell(
-                        Row(spacing=4, controls=[
-                            IconButton(icons.EDIT,   tooltip="Edit",   icon_color=SECONDARY, on_click=lambda e, row=r: open_edit(row)),
-                            IconButton(icons.DELETE, tooltip="Delete", icon_color=DANGER,    on_click=lambda e, row=r: ask_delete(row)),
-                        ])
-                    ),
-                ]
-            ))
-
-        table_container.controls.append(
-            DataTable(
-                columns=[
-                    DataColumn(Text("Product Name", weight=FontWeight.BOLD)),
-                    DataColumn(Text("SKU",          weight=FontWeight.BOLD)),
-                    DataColumn(Text("Category",     weight=FontWeight.BOLD)),
-                    DataColumn(Text("Supplier",     weight=FontWeight.BOLD)),
-                    DataColumn(Text("Qty",          weight=FontWeight.BOLD)),
-                    DataColumn(Text("Unit Price",   weight=FontWeight.BOLD)),
-                    DataColumn(Text("Actions",      weight=FontWeight.BOLD)),
-                ],
-                rows=dt_rows,
-                border=ft.border.all(1, "#E5E7EB"),
-                border_radius=border_radius.all(8),
-                horizontal_lines=ft.border.BorderSide(1, "#F3F4F6"),
-                column_spacing=20,
-            )
+    # ── snackbar helper ──────────────────────────
+    def toast(msg, ok=True):
+        page.snack_bar = ft.SnackBar(
+            ft.Text(msg, color=WHITE),
+            bgcolor=GREEN if ok else RED, duration=2000
         )
+        page.snack_bar.open = True
         page.update()
 
-    def on_search(e):
-        refresh(search_tf.value.strip())
+    # ═══════════════════════════════════════
+    #  TAB 1 – PRODUCTS (main CRUD)
+    # ═══════════════════════════════════════
+    def products_tab():
+        search_tf = ft.TextField(hint_text="Search product or category…",
+                                 prefix_icon=ft.icons.SEARCH, expand=True,
+                                 border_color=BLUE, border_radius=8)
+        rows_col  = ft.Column(scroll=ft.ScrollMode.AUTO, spacing=0)
 
-    # ── ADD / EDIT dialog ──────────────────────
-    def open_form(existing=None):
-        cats = db.get_categories()
-        sups = db.get_suppliers()
+        # ── form ────────────────────────────────
+        edit_id   = {"v": None}
+        name_tf   = ft.TextField(label="Product Name *", expand=True, border_color=BLUE)
+        qty_tf    = ft.TextField(label="Qty *", width=100, border_color=BLUE,
+                                 keyboard_type=ft.KeyboardType.NUMBER)
+        price_tf  = ft.TextField(label="Price ₱ *", width=130, border_color=BLUE,
+                                 keyboard_type=ft.KeyboardType.NUMBER)
+        cat_dd    = ft.Dropdown(label="Category", width=180, border_color=BLUE)
+        sup_dd    = ft.Dropdown(label="Supplier",  width=180, border_color=BLUE)
+        form_title = ft.Text("Add Product", size=16, weight=ft.FontWeight.BOLD, color=NAVY)
+        save_btn   = ft.ElevatedButton("Save", icon=ft.icons.SAVE,
+                                        bgcolor=NAVY, color=WHITE)
+        clear_btn  = ft.TextButton("Clear")
 
-        name_tf  = TextField(label="Product Name *", value=existing["product_name"] if existing else "", border_color=SECONDARY)
-        sku_tf   = TextField(label="SKU",            value=existing["sku"]          if existing else "", border_color=SECONDARY)
-        qty_tf   = TextField(label="Quantity *",     value=str(existing["quantity"])if existing else "0", keyboard_type=ft.KeyboardType.NUMBER, border_color=SECONDARY)
-        price_tf = TextField(label="Unit Price (₱)*",value=str(existing["unit_price"]) if existing else "0", keyboard_type=ft.KeyboardType.NUMBER, border_color=SECONDARY)
-        reorder_tf = TextField(label="Reorder Level", value=str(existing["reorder_level"]) if existing else "10", keyboard_type=ft.KeyboardType.NUMBER, border_color=SECONDARY)
-        desc_tf  = TextField(label="Description",    value=existing["description"]  if existing else "", multiline=True, min_lines=2, border_color=SECONDARY)
+        def load_dropdowns():
+            cat_dd.options = [ft.dropdown.Option(str(c["category_id"]), c["category_name"])
+                              for c in get_categories()]
+            sup_dd.options = [ft.dropdown.Option(str(s["supplier_id"]), s["supplier_name"])
+                              for s in get_suppliers()]
 
-        cat_options = [dropdown.Option(str(c["category_id"]), c["category_name"]) for c in cats]
-        sup_options = [dropdown.Option(str(s["supplier_id"]), s["supplier_name"]) for s in sups]
+        def load_table(search=""):
+            rows_col.controls.clear()
+            products = get_products(search)
+            if not products:
+                rows_col.controls.append(ft.Text("No products found.", color=GRAY, italic=True))
+                page.update(); return
 
-        cat_dd = Dropdown(label="Category", options=cat_options, border_color=SECONDARY)
-        sup_dd = Dropdown(label="Supplier", options=sup_options, border_color=SECONDARY)
+            # header
+            rows_col.controls.append(
+                ft.Container(
+                    bgcolor=NAVY, border_radius=ft.border_radius.only(top_left=8, top_right=8),
+                    padding=ft.padding.symmetric(horizontal=12, vertical=8),
+                    content=ft.Row([
+                        ft.Text("Product Name", color=WHITE, weight=ft.FontWeight.BOLD, expand=3),
+                        ft.Text("Category",     color=WHITE, weight=ft.FontWeight.BOLD, expand=2),
+                        ft.Text("Supplier",     color=WHITE, weight=ft.FontWeight.BOLD, expand=2),
+                        ft.Text("Qty",          color=WHITE, weight=ft.FontWeight.BOLD, width=60),
+                        ft.Text("Price",        color=WHITE, weight=ft.FontWeight.BOLD, width=100),
+                        ft.Text("Actions",      color=WHITE, weight=ft.FontWeight.BOLD, width=90),
+                    ])
+                )
+            )
 
-        # pre-select if editing
-        if existing:
-            for c in cats:
-                if c["category_name"] == existing.get("category_name"):
-                    cat_dd.value = str(c["category_id"])
-            for s in sups:
-                if s["supplier_name"] == existing.get("supplier_name"):
-                    sup_dd.value = str(s["supplier_id"])
+            for i, p in enumerate(products):
+                low = p["quantity"] <= 5
+                qty_color = RED if low else ft.colors.BLACK
+                bg = WHITE if i % 2 == 0 else "#F0F4FF"
 
-        def save(e):
+                def make_edit(prod):
+                    def do_edit(e):
+                        edit_id["v"]  = prod["product_id"]
+                        name_tf.value = prod["product_name"]
+                        qty_tf.value  = str(prod["quantity"])
+                        price_tf.value= str(prod["price"])
+                        form_title.value = "✏️  Edit Product"
+                        # match dropdowns
+                        for c in get_categories():
+                            if c["category_name"] == prod["category_name"]:
+                                cat_dd.value = str(c["category_id"])
+                        for s in get_suppliers():
+                            if s["supplier_name"] == prod["supplier_name"]:
+                                sup_dd.value = str(s["supplier_id"])
+                        page.update()
+                    return do_edit
+
+                def make_delete(prod):
+                    def do_delete(e):
+                        dlg = ft.AlertDialog(
+                            modal=True,
+                            title=ft.Text("Delete Product?"),
+                            content=ft.Text(f"Delete '{prod['product_name']}'? This cannot be undone."),
+                            actions=[
+                                ft.TextButton("Cancel", on_click=lambda e: setattr(dlg, 'open', False) or page.update()),
+                                ft.FilledButton("Delete",
+                                    style=ft.ButtonStyle(bgcolor=RED),
+                                    on_click=lambda e: [
+                                        setattr(dlg, 'open', False),
+                                        delete_product(prod["product_id"]),
+                                        toast("Product deleted."),
+                                        load_table(search_tf.value),
+                                    ]),
+                            ]
+                        )
+                        page.dialog = dlg; dlg.open = True; page.update()
+                    return do_delete
+
+                rows_col.controls.append(
+                    ft.Container(
+                        bgcolor=bg,
+                        padding=ft.padding.symmetric(horizontal=12, vertical=6),
+                        border=ft.border.only(bottom=ft.border.BorderSide(1, "#E5E7EB")),
+                        content=ft.Row([
+                            ft.Text(p["product_name"], expand=3),
+                            ft.Text(p["category_name"] or "—", expand=2, color=GRAY),
+                            ft.Text(p["supplier_name"] or "—", expand=2, color=GRAY),
+                            ft.Text(str(p["quantity"]), width=60, color=qty_color,
+                                    weight=ft.FontWeight.BOLD),
+                            ft.Text(f"₱{p['price']:,.2f}", width=100),
+                            ft.Row(width=90, spacing=0, controls=[
+                                ft.IconButton(ft.icons.EDIT,   icon_color=BLUE, tooltip="Edit",
+                                              on_click=make_edit(p)),
+                                ft.IconButton(ft.icons.DELETE, icon_color=RED,  tooltip="Delete",
+                                              on_click=make_delete(p)),
+                            ]),
+                        ])
+                    )
+                )
+            page.update()
+
+        def do_save(e):
             if not name_tf.value.strip():
-                snack(page, "Product name is required.", error=True); return
+                toast("Product name is required.", ok=False); return
             try:
                 qty   = int(qty_tf.value or 0)
                 price = float(price_tf.value or 0)
-                reorder = int(reorder_tf.value or 10)
             except ValueError:
-                snack(page, "Qty, Price and Reorder must be numbers.", error=True); return
+                toast("Qty and Price must be numbers.", ok=False); return
 
-            data = {
-                "product_name":  name_tf.value.strip(),
-                "sku":           sku_tf.value.strip(),
-                "category_id":   int(cat_dd.value) if cat_dd.value else None,
-                "supplier_id":   int(sup_dd.value) if sup_dd.value else None,
-                "quantity":      qty,
-                "unit_price":    price,
-                "reorder_level": reorder,
-                "description":   desc_tf.value.strip(),
-            }
-            try:
-                if existing:
-                    db.update_product(existing["product_id"], data)
-                    snack(page, "Product updated successfully.")
-                else:
-                    db.insert_product(data)
-                    snack(page, "Product added successfully.")
-            except Exception as ex:
-                snack(page, f"Error: {ex}", error=True); return
+            cat = int(cat_dd.value) if cat_dd.value else None
+            sup = int(sup_dd.value) if sup_dd.value else None
 
-            close_dlg(page, dlg)
-            refresh()
+            if edit_id["v"]:
+                update_product(edit_id["v"], name_tf.value.strip(), cat, sup, qty, price)
+                toast("Product updated!")
+            else:
+                add_product(name_tf.value.strip(), cat, sup, qty, price)
+                toast("Product added!")
 
-        dlg = AlertDialog(
-            modal=True,
-            title=Text("Edit Product" if existing else "Add New Product", weight=FontWeight.BOLD, color=PRIMARY),
-            content=Container(
-                width=480,
-                content=Column(
-                    scroll=ScrollMode.AUTO,
-                    spacing=10,
-                    controls=[name_tf, sku_tf, cat_dd, sup_dd, qty_tf, price_tf, reorder_tf, desc_tf],
-                ),
-            ),
-            actions=[
-                TextButton("Cancel", on_click=lambda e: close_dlg(page, dlg)),
-                FilledButton("Save", on_click=save, style=ft.ButtonStyle(bgcolor=PRIMARY)),
-            ],
-        )
-        page.dialog = dlg
-        dlg.open = True
-        page.update()
+            do_clear(None)
+            load_table()
 
-    def open_edit(row):   open_form(existing=row)
-
-    def ask_delete(row):
-        confirm_dialog(
-            page,
-            f"Delete '{row['product_name']}'? This cannot be undone.",
-            lambda: do_delete(row["product_id"]),
-        )
-
-    def do_delete(pid):
-        try:
-            db.delete_product(pid)
-            snack(page, "Product deleted.")
-            refresh()
-        except Exception as ex:
-            snack(page, f"Error: {ex}", error=True)
-
-    refresh()
-
-    return Column(
-        spacing=16,
-        expand=True,
-        controls=[
-            section_title("📦  Products"),
-            Divider(height=1, color="#E5E7EB"),
-            Row(controls=[
-                search_tf,
-                ElevatedButton("Search",     on_click=on_search,        bgcolor=SECONDARY, color=colors.WHITE),
-                ElevatedButton("+ Add Product", on_click=lambda e: open_form(), bgcolor=PRIMARY, color=colors.WHITE),
-                ElevatedButton("Refresh",    on_click=lambda e: refresh(), bgcolor=ACCENT,   color=colors.WHITE),
-            ], spacing=8),
-            Card(
-                elevation=2,
-                content=Container(
-                    padding=padding.all(16),
-                    content=table_container,
-                ),
-            ),
-        ],
-    )
-
-
-# ───────────────────────────────────────────
-#  STOCK MANAGEMENT (IN / OUT / ADJUST)
-# ───────────────────────────────────────────
-
-def build_stock(page: Page):
-    products  = db.get_all_products()
-    prod_opts = [dropdown.Option(str(p["product_id"]), f"{p['product_name']} (Qty: {p['quantity']})") for p in products]
-
-    prod_dd   = Dropdown(label="Select Product *", options=prod_opts, border_color=SECONDARY, expand=True)
-    type_dd   = Dropdown(label="Transaction Type *", border_color=SECONDARY, width=200, options=[
-        dropdown.Option("IN",         "Stock In  (Receiving)"),
-        dropdown.Option("OUT",        "Stock Out (Issuing)"),
-        dropdown.Option("ADJUSTMENT", "Manual Adjustment"),
-    ])
-    qty_tf    = TextField(label="Quantity *", keyboard_type=ft.KeyboardType.NUMBER, border_color=SECONDARY, width=150)
-    notes_tf  = TextField(label="Notes / Remarks", multiline=True, min_lines=2, border_color=SECONDARY, expand=True)
-
-    log_container = Column(scroll=ScrollMode.AUTO)
-
-    def refresh_log(pid=None):
-        log_container.controls.clear()
-        txs = db.get_transactions(pid)
-        if not txs:
-            log_container.controls.append(Text("No transactions yet.", color=TEXT_MUTED))
+        def do_clear(e):
+            edit_id["v"] = None
+            name_tf.value = qty_tf.value = price_tf.value = ""
+            cat_dd.value  = sup_dd.value = None
+            form_title.value = "Add Product"
             page.update()
-            return
-        rows = []
-        for t in txs:
-            color = SUCCESS if t["transaction_type"] == "IN" else (DANGER if t["transaction_type"] == "OUT" else ACCENT)
-            rows.append(DataRow(cells=[
-                DataCell(Text(str(t["transaction_id"]))),
-                DataCell(Text(t["product_name"])),
-                DataCell(Text(t["transaction_type"], color=color, weight=FontWeight.BOLD)),
-                DataCell(Text(str(t["quantity_change"]))),
-                DataCell(Text(t["notes"] or "")),
-                DataCell(Text(str(t["transaction_date"])[:16])),
-            ]))
-        log_container.controls.append(
-            DataTable(
-                columns=[
-                    DataColumn(Text("#",           weight=FontWeight.BOLD)),
-                    DataColumn(Text("Product",     weight=FontWeight.BOLD)),
-                    DataColumn(Text("Type",        weight=FontWeight.BOLD)),
-                    DataColumn(Text("Qty Change",  weight=FontWeight.BOLD)),
-                    DataColumn(Text("Notes",       weight=FontWeight.BOLD)),
-                    DataColumn(Text("Date",        weight=FontWeight.BOLD)),
-                ],
-                rows=rows,
-                border=ft.border.all(1, "#E5E7EB"),
-                border_radius=border_radius.all(8),
-                horizontal_lines=ft.border.BorderSide(1, "#F3F4F6"),
+
+        save_btn.on_click  = do_save
+        clear_btn.on_click = do_clear
+        search_tf.on_submit = lambda e: load_table(search_tf.value.strip())
+        ft.ElevatedButton  # just to avoid lint issue
+
+        load_dropdowns()
+        load_table()
+
+        return ft.Column(spacing=16, controls=[
+            # ── form card ────────────────────────
+            ft.Card(elevation=2, content=ft.Container(
+                padding=20, bgcolor=WHITE, border_radius=10,
+                content=ft.Column(spacing=10, controls=[
+                    form_title,
+                    ft.Row([name_tf, qty_tf, price_tf], spacing=8),
+                    ft.Row([cat_dd, sup_dd, save_btn, clear_btn], spacing=8),
+                ])
+            )),
+            # ── search + table ───────────────────
+            ft.Row([
+                search_tf,
+                ft.ElevatedButton("Search", bgcolor=BLUE, color=WHITE,
+                                  on_click=lambda e: load_table(search_tf.value.strip())),
+                ft.ElevatedButton("Show All", bgcolor=GRAY, color=WHITE,
+                                  on_click=lambda e: [setattr(search_tf, 'value', ''), load_table(), page.update()]),
+            ], spacing=8),
+            ft.Card(elevation=2, content=ft.Container(
+                padding=12, bgcolor=WHITE, border_radius=10,
+                content=rows_col,
+            )),
+        ])
+
+    # ═══════════════════════════════════════
+    #  TAB 2 – STOCK IN / OUT
+    # ═══════════════════════════════════════
+    def stock_tab():
+        prod_dd  = ft.Dropdown(label="Select Product *", expand=True, border_color=BLUE)
+        type_dd  = ft.Dropdown(label="Type *", width=160, border_color=BLUE, options=[
+            ft.dropdown.Option("IN",  "Stock IN"),
+            ft.dropdown.Option("OUT", "Stock OUT"),
+        ])
+        qty_tf   = ft.TextField(label="Quantity *", width=120, border_color=BLUE,
+                                keyboard_type=ft.KeyboardType.NUMBER)
+        log_col  = ft.Column(scroll=ft.ScrollMode.AUTO, spacing=0)
+
+        def load():
+            products = get_products()
+            prod_dd.options = [
+                ft.dropdown.Option(str(p["product_id"]),
+                                   f"{p['product_name']}  (stock: {p['quantity']})")
+                for p in products
+            ]
+            log_col.controls.clear()
+            txs = get_transactions()
+            if not txs:
+                log_col.controls.append(ft.Text("No transactions yet.", color=GRAY, italic=True))
+                page.update(); return
+
+            log_col.controls.append(
+                ft.Container(
+                    bgcolor=NAVY, border_radius=ft.border_radius.only(top_left=8, top_right=8),
+                    padding=ft.padding.symmetric(horizontal=12, vertical=8),
+                    content=ft.Row([
+                        ft.Text("#",       color=WHITE, weight=ft.FontWeight.BOLD, width=50),
+                        ft.Text("Product", color=WHITE, weight=ft.FontWeight.BOLD, expand=3),
+                        ft.Text("Type",    color=WHITE, weight=ft.FontWeight.BOLD, width=80),
+                        ft.Text("Qty",     color=WHITE, weight=ft.FontWeight.BOLD, width=60),
+                        ft.Text("Date",    color=WHITE, weight=ft.FontWeight.BOLD, expand=2),
+                    ])
+                )
             )
-        )
-        page.update()
+            for i, t in enumerate(txs):
+                color = GREEN if t["type"] == "IN" else RED
+                bg    = WHITE if i % 2 == 0 else "#F0F4FF"
+                log_col.controls.append(
+                    ft.Container(
+                        bgcolor=bg,
+                        padding=ft.padding.symmetric(horizontal=12, vertical=6),
+                        border=ft.border.only(bottom=ft.border.BorderSide(1, "#E5E7EB")),
+                        content=ft.Row([
+                            ft.Text(str(t["transaction_id"]), width=50, color=GRAY),
+                            ft.Text(t["product_name"], expand=3),
+                            ft.Text(t["type"], width=80, color=color, weight=ft.FontWeight.BOLD),
+                            ft.Text(str(t["quantity"]), width=60),
+                            ft.Text(str(t["transaction_date"])[:16], expand=2, color=GRAY),
+                        ])
+                    )
+                )
+            page.update()
 
-    def do_transaction(e):
-        if not prod_dd.value:
-            snack(page, "Please select a product.", error=True); return
-        if not type_dd.value:
-            snack(page, "Please select a transaction type.", error=True); return
-        try:
-            qty = int(qty_tf.value or 0)
-            if qty <= 0:
-                raise ValueError
-        except ValueError:
-            snack(page, "Enter a valid positive quantity.", error=True); return
+        def do_submit(e):
+            if not prod_dd.value or not type_dd.value:
+                toast("Select a product and type.", ok=False); return
+            try:
+                qty = int(qty_tf.value or 0)
+                if qty <= 0: raise ValueError
+            except ValueError:
+                toast("Enter a valid quantity.", ok=False); return
 
-        pid    = int(prod_dd.value)
-        txtype = type_dd.value
-        delta  = qty if txtype == "IN" else (-qty if txtype == "OUT" else qty)
+            if type_dd.value == "OUT":
+                prods = get_products()
+                cur_qty = next((p["quantity"] for p in prods
+                                if str(p["product_id"]) == prod_dd.value), 0)
+                if qty > cur_qty:
+                    toast(f"Not enough stock! Only {cur_qty} available.", ok=False); return
 
-        # guard against negative stock
-        if txtype == "OUT":
-            prods = db.get_all_products()
-            current = next((p["quantity"] for p in prods if p["product_id"] == pid), 0)
-            if qty > current:
-                snack(page, f"Cannot remove {qty}. Only {current} in stock.", error=True); return
+            log_transaction(int(prod_dd.value), type_dd.value, qty)
+            toast(f"Stock {type_dd.value} recorded!")
+            qty_tf.value = ""
+            load()
 
-        try:
-            db.adjust_stock(pid, delta, txtype, notes_tf.value.strip())
-            snack(page, f"Transaction recorded! Stock {'increased' if delta > 0 else 'decreased'} by {abs(delta)}.")
-        except Exception as ex:
-            snack(page, f"Error: {ex}", error=True); return
+        load()
 
-        qty_tf.value   = ""
-        notes_tf.value = ""
-        # refresh dropdown labels
-        updated = db.get_all_products()
-        prod_dd.options = [
-            dropdown.Option(str(p["product_id"]), f"{p['product_name']} (Qty: {p['quantity']})")
-            for p in updated
-        ]
-        refresh_log()
+        return ft.Column(spacing=16, controls=[
+            ft.Card(elevation=2, content=ft.Container(
+                padding=20, bgcolor=WHITE, border_radius=10,
+                content=ft.Column(spacing=10, controls=[
+                    ft.Text("Record Stock Movement", size=16,
+                            weight=ft.FontWeight.BOLD, color=NAVY),
+                    ft.Row([prod_dd, type_dd, qty_tf], spacing=8),
+                    ft.ElevatedButton("Submit", icon=ft.icons.CHECK_CIRCLE,
+                                      bgcolor=GREEN, color=WHITE, on_click=do_submit),
+                ])
+            )),
+            ft.Text("Transaction History", size=16, weight=ft.FontWeight.BOLD, color=NAVY),
+            ft.Card(elevation=2, content=ft.Container(
+                padding=12, bgcolor=WHITE, border_radius=10,
+                content=log_col,
+            )),
+        ])
 
-    refresh_log()
+    # ═══════════════════════════════════════
+    #  TAB 3 – CATEGORIES & SUPPLIERS
+    # ═══════════════════════════════════════
+    def manage_tab():
+        cat_tf   = ft.TextField(label="Category Name", expand=True, border_color=BLUE)
+        sup_tf   = ft.TextField(label="Supplier Name", expand=True, border_color=BLUE)
+        cont_tf  = ft.TextField(label="Contact",       width=180,   border_color=BLUE)
+        cat_col  = ft.Column(spacing=4)
+        sup_col  = ft.Column(spacing=4)
 
-    return Column(
-        spacing=16,
-        scroll=ScrollMode.AUTO,
-        controls=[
-            section_title("🔄  Stock Management"),
-            Divider(height=1, color="#E5E7EB"),
-            Card(
-                elevation=2,
-                content=Container(
-                    padding=padding.all(20),
-                    content=Column(spacing=12, controls=[
-                        Text("Record a Stock Transaction", weight=FontWeight.BOLD, size=16, color=PRIMARY),
-                        Row(controls=[prod_dd, type_dd, qty_tf], spacing=10, wrap=True),
-                        notes_tf,
-                        ElevatedButton("Submit Transaction", on_click=do_transaction,
-                                       bgcolor=PRIMARY, color=colors.WHITE, icon=icons.SWAP_HORIZ),
-                    ]),
-                ),
-            ),
-            section_title("📋  Transaction History"),
-            Card(
-                elevation=2,
-                content=Container(padding=padding.all(16), content=log_container),
-            ),
-        ],
-    )
+        def load():
+            cat_col.controls.clear()
+            for c in get_categories():
+                cat_col.controls.append(ft.Container(
+                    bgcolor="#F0F4FF", border_radius=6,
+                    padding=ft.padding.symmetric(horizontal=12, vertical=6),
+                    content=ft.Row([
+                        ft.Icon(ft.icons.LABEL, color=BLUE, size=16),
+                        ft.Text(c["category_name"], expand=True),
+                    ])
+                ))
 
+            sup_col.controls.clear()
+            for s in get_suppliers():
+                sup_col.controls.append(ft.Container(
+                    bgcolor="#F0F4FF", border_radius=6,
+                    padding=ft.padding.symmetric(horizontal=12, vertical=6),
+                    content=ft.Row([
+                        ft.Icon(ft.icons.LOCAL_SHIPPING, color=BLUE, size=16),
+                        ft.Text(s["supplier_name"], expand=True),
+                        ft.Text(s["contact"] or "", color=GRAY),
+                    ])
+                ))
+            page.update()
 
-# ───────────────────────────────────────────
-#  CATEGORIES
-# ───────────────────────────────────────────
+        def add_cat(e):
+            if not cat_tf.value.strip():
+                toast("Enter a category name.", ok=False); return
+            add_category(cat_tf.value.strip())
+            cat_tf.value = ""
+            toast("Category added!")
+            load()
 
-def build_categories(page: Page):
-    name_tf = TextField(label="Category Name *", border_color=SECONDARY, expand=True)
-    desc_tf = TextField(label="Description",     border_color=SECONDARY, expand=True)
-    container = Column(scroll=ScrollMode.AUTO)
+        def add_sup(e):
+            if not sup_tf.value.strip():
+                toast("Enter a supplier name.", ok=False); return
+            add_supplier(sup_tf.value.strip(), cont_tf.value.strip())
+            sup_tf.value = cont_tf.value = ""
+            toast("Supplier added!")
+            load()
 
-    def refresh():
-        container.controls.clear()
-        cats = db.get_categories()
-        if not cats:
-            container.controls.append(Text("No categories yet.", color=TEXT_MUTED))
-            page.update(); return
+        load()
 
-        rows = []
-        for c in cats:
-            rows.append(DataRow(cells=[
-                DataCell(Text(str(c["category_id"]))),
-                DataCell(Text(c["category_name"])),
-                DataCell(Text(c["description"] or "")),
-                DataCell(IconButton(icons.DELETE, icon_color=DANGER, tooltip="Delete",
-                                    on_click=lambda e, cid=c["category_id"]: ask_del(cid))),
-            ]))
-        container.controls.append(DataTable(
-            columns=[
-                DataColumn(Text("#",           weight=FontWeight.BOLD)),
-                DataColumn(Text("Name",        weight=FontWeight.BOLD)),
-                DataColumn(Text("Description", weight=FontWeight.BOLD)),
-                DataColumn(Text("Action",      weight=FontWeight.BOLD)),
-            ],
-            rows=rows,
-            border=ft.border.all(1, "#E5E7EB"),
-            border_radius=border_radius.all(8),
-            horizontal_lines=ft.border.BorderSide(1, "#F3F4F6"),
-        ))
-        page.update()
+        return ft.Row(spacing=16, vertical_alignment=ft.CrossAxisAlignment.START, controls=[
+            # categories
+            ft.Card(elevation=2, expand=True, content=ft.Container(
+                padding=20, bgcolor=WHITE, border_radius=10,
+                content=ft.Column(spacing=10, controls=[
+                    ft.Text("Categories", size=16, weight=ft.FontWeight.BOLD, color=NAVY),
+                    ft.Row([cat_tf,
+                            ft.ElevatedButton("Add", bgcolor=NAVY, color=WHITE, on_click=add_cat)]),
+                    ft.Divider(),
+                    cat_col,
+                ])
+            )),
+            # suppliers
+            ft.Card(elevation=2, expand=True, content=ft.Container(
+                padding=20, bgcolor=WHITE, border_radius=10,
+                content=ft.Column(spacing=10, controls=[
+                    ft.Text("Suppliers", size=16, weight=ft.FontWeight.BOLD, color=NAVY),
+                    ft.Row([sup_tf, cont_tf,
+                            ft.ElevatedButton("Add", bgcolor=NAVY, color=WHITE, on_click=add_sup)]),
+                    ft.Divider(),
+                    sup_col,
+                ])
+            )),
+        ])
 
-    def add(e):
-        if not name_tf.value.strip():
-            snack(page, "Category name required.", error=True); return
-        try:
-            db.insert_category(name_tf.value.strip(), desc_tf.value.strip())
-            snack(page, "Category added.")
-            name_tf.value = ""; desc_tf.value = ""
-            refresh()
-        except Exception as ex:
-            snack(page, f"Error: {ex}", error=True)
-
-    def ask_del(cid):
-        confirm_dialog(page, "Delete this category?", lambda: do_del(cid))
-
-    def do_del(cid):
-        db.delete_category(cid); snack(page, "Deleted."); refresh()
-
-    refresh()
-
-    return Column(
-        spacing=16,
-        scroll=ScrollMode.AUTO,
-        controls=[
-            section_title("🏷️  Categories"),
-            Divider(height=1, color="#E5E7EB"),
-            Card(elevation=2, content=Container(padding=padding.all(20), content=Column(spacing=10, controls=[
-                Text("Add Category", weight=FontWeight.BOLD, color=PRIMARY),
-                Row(controls=[name_tf, desc_tf], spacing=10),
-                ElevatedButton("+ Add", on_click=add, bgcolor=PRIMARY, color=colors.WHITE),
-            ]))),
-            section_title("All Categories"),
-            Card(elevation=2, content=Container(padding=padding.all(16), content=container)),
-        ],
-    )
-
-
-# ───────────────────────────────────────────
-#  SUPPLIERS
-# ───────────────────────────────────────────
-
-def build_suppliers(page: Page):
-    name_tf    = TextField(label="Supplier Name *",  border_color=SECONDARY, expand=True)
-    contact_tf = TextField(label="Contact Person",   border_color=SECONDARY, expand=True)
-    phone_tf   = TextField(label="Phone",            border_color=SECONDARY, width=180)
-    email_tf   = TextField(label="Email",            border_color=SECONDARY, expand=True)
-    address_tf = TextField(label="Address",          border_color=SECONDARY, expand=True)
-    container  = Column(scroll=ScrollMode.AUTO)
-
-    def refresh():
-        container.controls.clear()
-        sups = db.get_suppliers()
-        if not sups:
-            container.controls.append(Text("No suppliers yet.", color=TEXT_MUTED))
-            page.update(); return
-
-        rows = []
-        for s in sups:
-            rows.append(DataRow(cells=[
-                DataCell(Text(str(s["supplier_id"]))),
-                DataCell(Text(s["supplier_name"])),
-                DataCell(Text(s["contact_name"] or "")),
-                DataCell(Text(s["phone"] or "")),
-                DataCell(Text(s["email"] or "")),
-                DataCell(IconButton(icons.DELETE, icon_color=DANGER, tooltip="Delete",
-                                    on_click=lambda e, sid=s["supplier_id"]: ask_del(sid))),
-            ]))
-        container.controls.append(DataTable(
-            columns=[
-                DataColumn(Text("#",       weight=FontWeight.BOLD)),
-                DataColumn(Text("Name",    weight=FontWeight.BOLD)),
-                DataColumn(Text("Contact", weight=FontWeight.BOLD)),
-                DataColumn(Text("Phone",   weight=FontWeight.BOLD)),
-                DataColumn(Text("Email",   weight=FontWeight.BOLD)),
-                DataColumn(Text("Action",  weight=FontWeight.BOLD)),
-            ],
-            rows=rows,
-            border=ft.border.all(1, "#E5E7EB"),
-            border_radius=border_radius.all(8),
-            horizontal_lines=ft.border.BorderSide(1, "#F3F4F6"),
-        ))
-        page.update()
-
-    def add(e):
-        if not name_tf.value.strip():
-            snack(page, "Supplier name required.", error=True); return
-        try:
-            db.insert_supplier({
-                "supplier_name": name_tf.value.strip(),
-                "contact_name":  contact_tf.value.strip(),
-                "phone":         phone_tf.value.strip(),
-                "email":         email_tf.value.strip(),
-                "address":       address_tf.value.strip(),
-            })
-            snack(page, "Supplier added.")
-            for tf in [name_tf, contact_tf, phone_tf, email_tf, address_tf]:
-                tf.value = ""
-            refresh()
-        except Exception as ex:
-            snack(page, f"Error: {ex}", error=True)
-
-    def ask_del(sid):
-        confirm_dialog(page, "Delete this supplier?", lambda: do_del(sid))
-
-    def do_del(sid):
-        db.delete_supplier(sid); snack(page, "Deleted."); refresh()
-
-    refresh()
-
-    return Column(
-        spacing=16,
-        scroll=ScrollMode.AUTO,
-        controls=[
-            section_title("🚚  Suppliers"),
-            Divider(height=1, color="#E5E7EB"),
-            Card(elevation=2, content=Container(padding=padding.all(20), content=Column(spacing=10, controls=[
-                Text("Add Supplier", weight=FontWeight.BOLD, color=PRIMARY),
-                Row(controls=[name_tf, contact_tf], spacing=10),
-                Row(controls=[phone_tf, email_tf, address_tf], spacing=10),
-                ElevatedButton("+ Add", on_click=add, bgcolor=PRIMARY, color=colors.WHITE),
-            ]))),
-            section_title("All Suppliers"),
-            Card(elevation=2, content=Container(padding=padding.all(16), content=container)),
-        ],
-    )
-
-
-# ═══════════════════════════════════════════════════════════════
-#  MAIN APP
-# ═══════════════════════════════════════════════════════════════
-
-def main(page: Page):
-    page.title           = "Inventory Tracking System"
-    page.theme_mode      = ThemeMode.LIGHT
-    page.bgcolor         = BG
-    page.window_width    = 1200
-    page.window_height   = 760
-    page.window_min_width  = 900
-    page.window_min_height = 600
-    page.padding         = 0
-    page.fonts           = {}
-
-    # ── content area ──────────────────────────────
-    content_area = Container(expand=True, padding=padding.all(24), bgcolor=BG)
-
-    def load_page(index: int):
-        builders = [
-            build_dashboard,
-            build_products,
-            build_stock,
-            build_categories,
-            build_suppliers,
-        ]
-        content_area.content = builders[index](page)
-        page.update()
-
-    # ── nav rail ──────────────────────────────────
-    nav = NavigationRail(
+    # ═══════════════════════════════════════
+    #  TABS WRAPPER
+    # ═══════════════════════════════════════
+    tabs = ft.Tabs(
         selected_index=0,
-        label_type=ft.NavigationRailLabelType.ALL,
-        min_width=90,
-        bgcolor=NAV_BG,
-        indicator_color=NAV_SELECTED,
-        on_change=lambda e: load_page(e.control.selected_index),
-        leading=Container(
-            padding=padding.symmetric(vertical=16, horizontal=8),
-            content=Column(
-                horizontal_alignment=CrossAxisAlignment.CENTER,
-                spacing=2,
-                controls=[
-                    Icon(icons.INVENTORY, color=colors.WHITE, size=32),
-                    Text("InvTrack", color=colors.WHITE, size=11, weight=FontWeight.BOLD),
-                ],
-            ),
-        ),
-        destinations=[
-            NavigationRailDestination(
-                icon=icons.DASHBOARD_OUTLINED, selected_icon=icons.DASHBOARD,
-                label_content=Text("Dashboard", color=colors.WHITE70, size=11),
-            ),
-            NavigationRailDestination(
-                icon=icons.INVENTORY_2_OUTLINED, selected_icon=icons.INVENTORY_2,
-                label_content=Text("Products", color=colors.WHITE70, size=11),
-            ),
-            NavigationRailDestination(
-                icon=icons.SWAP_HORIZ_OUTLINED, selected_icon=icons.SWAP_HORIZ,
-                label_content=Text("Stock", color=colors.WHITE70, size=11),
-            ),
-            NavigationRailDestination(
-                icon=icons.LABEL_OUTLINED, selected_icon=icons.LABEL,
-                label_content=Text("Categories", color=colors.WHITE70, size=11),
-            ),
-            NavigationRailDestination(
-                icon=icons.LOCAL_SHIPPING_OUTLINED, selected_icon=icons.LOCAL_SHIPPING,
-                label_content=Text("Suppliers", color=colors.WHITE70, size=11),
-            ),
-        ],
+        animation_duration=200,
+        tab_alignment=ft.TabAlignment.START,
+        expand=True,
+        tabs=[
+            ft.Tab(text="📦  Products",           content=ft.Container(padding=16, content=products_tab())),
+            ft.Tab(text="🔄  Stock IN / OUT",     content=ft.Container(padding=16, content=stock_tab())),
+            ft.Tab(text="🏷️  Categories & Suppliers", content=ft.Container(padding=16, content=manage_tab())),
+        ]
     )
 
     page.add(
-        Row(
-            expand=True,
-            spacing=0,
-            controls=[
-                nav,
-                ft.VerticalDivider(width=1, color="#E5E7EB"),
-                content_area,
-            ],
-        )
+        # header bar
+        ft.Container(
+            bgcolor=NAVY, padding=ft.padding.symmetric(horizontal=24, vertical=14),
+            content=ft.Row([
+                ft.Icon(ft.icons.INVENTORY_2, color=WHITE, size=28),
+                ft.Text("Inventory Tracking System", color=WHITE, size=20,
+                        weight=ft.FontWeight.BOLD),
+                ft.Text("CCC 151 Final Project", color="#90A4AE", size=12,
+                        expand=True, text_align=ft.TextAlign.RIGHT),
+            ])
+        ),
+        tabs,
     )
 
-    load_page(0)
-
-
-if __name__ == "__main__":
-    ft.app(target=main)
+ft.app(target=main)
